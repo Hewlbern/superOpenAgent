@@ -1,0 +1,22 @@
+{
+  "name": "super-open-agent",
+  "version": "0.1.0",
+  "description": "A TypeScript Super-agent harness: two-level Router/Worker architecture, event-driven Triggers, full-duplex async ReAct, Inline & Spill context, Chain of Recall, and a Watchdog.",
+  "type": "module",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": { "super-open-agent": "dist/cli.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node dist/cli.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
