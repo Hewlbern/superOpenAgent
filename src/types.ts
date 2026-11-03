@@ -1,5 +1,5 @@
 /** Core object model. Every object has a unique ID so they form a reference graph (Chain of Recall, §3.3). */
-export type ChannelKind = "im" | "github" | "email" | "calendar" | "ci" | "cli" | "doc";
+export type ChannelKind = "im" | "github" | "email" | "calendar" | "ci" | "cli" | "doc" | "agent";
 
 export interface Trigger {
   id: string;
@@ -39,6 +39,8 @@ export interface WorkerRecord {
   createdAt: number;
   lastProgressAt: number;
   speculative: boolean;
+  /** Identity (WebID / did:key) issued to this worker, if an IdentityProvider is configured. */
+  identity?: import("./identity.js").AgentIdentity;
 }
 
 export interface ChatMessage {

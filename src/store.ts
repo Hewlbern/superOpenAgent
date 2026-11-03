@@ -1,5 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { MemoryFact } from "./memory.js";
+import type { AgentIdentity } from "./identity.js";
 import type { Thread, Trigger, WorkerRecord, ChatMessage } from "./types.js";
 
 /**
@@ -12,6 +14,10 @@ export interface StateSnapshot {
   workers: Record<string, WorkerRecord>;
   sessions: Record<string, ChatMessage[]>;
   policies: string[];
+  /** Long-term memory facts. */
+  memories?: MemoryFact[];
+  /** Router identity (public part only). */
+  identity?: AgentIdentity;
 }
 
 export interface StateStore {
@@ -25,6 +31,7 @@ export const emptySnapshot = (): StateSnapshot => ({
   workers: {},
   sessions: {},
   policies: [],
+  memories: [],
 });
 
 export class MemoryStore implements StateStore {

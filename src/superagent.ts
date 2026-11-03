@@ -8,6 +8,10 @@ import { channelNorms, formatForChannel } from "./channels.js";
 import type { Environment, ExecResult } from "./environments.js";
 import { MemoryStore, type StateSnapshot, type StateStore } from "./store.js";
 import { newId } from "./ids.js";
+import { LongTermMemory } from "./memory.js";
+import type { CredentialBroker } from "./credentials.js";
+import type { AgentIdentity, IdentityProvider } from "./identity.js";
+import { envelopePayload, type AgentBus, type AgentEnvelope } from "./a2a.js";
 
 export interface SuperAgentOptions {
   routerLLM: LLM;
@@ -21,6 +25,16 @@ export interface SuperAgentOptions {
   passThrough?: boolean;
   inlineSpill?: InlineSpillOptions;
   onOutbound?: (m: OutboundMessage) => void;
+  /** Issues identities (WebID + Ed25519) to the Router and every Worker, e.g. OpenIDIdentityProvider. */
+  identity?: IdentityProvider;
+  /** Name for this instance (identity + agent bus). */
+  name?: string;
+  /** Secrets injected into commands at execution time; redacted from all model-visible output. */
+  credentials?: CredentialBroker;
+  /** Agent-to-agent bus shared with other SuperAgent instances. */
+  bus?: AgentBus;
+  /** Store factory that needs the Router identity (e.g. OpenIDPodStore). Overrides `store`. */
+  storeFor?: (identity: AgentIdentity) => StateStore;
 }
 
 const ROUTER_PROMPT = `You are the Router of a Super-agent: one continuous agent across all channels.
@@ -45,10 +59,13 @@ export class SuperAgent {
   router!: AgentSession;
   readonly workers = new Map<string, AgentSession>();
   readonly outbox: OutboundMessage[] = [];
+  private pendingIdentities = new Set<Promise<void>>();
   private jobs = new Map<string, { workerId: string; env: Environment }>();
   private store: StateStore;
   private passThrough: boolean;
   private inlineSpill: InlineSpillOptions;
+  readonly memory = new LongTermMemory(() => this.state);
+  identity?: AgentIdentity;
   metrics = { routerDecisions: 0, routerBatches: [] as number[], passedThrough: 0, dropped: 0 };
 
   constructor(private readonly opts: SuperAgentOptions) {
@@ -59,7 +76,17 @@ export class SuperAgent {
 
   /** Load persistent state and rebuild sessions (stateless compute, §5.1). */
   async init(): Promise<this> {
+    if (this.opts.identity) {
+      this.identity = await this.opts.identity.issue(this.opts.name ?? "router");
+      if (this.opts.storeFor) this.store = this.opts.storeFor(this.identity);
+    }
     this.state = await this.store.load();
+    if (this.identity) this.state.identity = this.identity;
+    if (this.opts.bus) {
+      const ident = this.identity ?? { id: this.opts.name ?? newId("agt"), name: this.opts.name ?? "agent", webId: "", didKey: "", publicKey: "" };
+      this.identity ??= ident;
+      this.opts.bus.join({ identity: ident, deliver: async (e) => void (await this.receiveAgentMessage(e)) });
+    }
     const routerMsgs = this.state.sessions.router ?? [{ role: "system" as const, content: ROUTER_PROMPT }];
     this.state.sessions.router = routerMsgs;
     this.router = new AgentSession("router", this.opts.routerLLM, routerTools, routerMsgs, (n, a) => this.routerTool(n, a));
@@ -128,6 +155,11 @@ export class SuperAgent {
         return `Dispatched ${this.dispatch(String(a.task), String(a.threadKey), Boolean(a.speculative)).id}`;
       case "reply": {
         const channel = String(a.channel) as ChannelKind;
+        if (channel === "agent") {
+          const th = Object.values(this.state.threads).find((x) => x.key === String(a.threadKey));
+          const last = th?.triggerIds.map((id) => this.state.triggers[id]).reverse().find((x) => x?.channel === "agent");
+          if (last) return this.sendAgentMessage(last.source, String(a.threadKey), String(a.text));
+        }
         const msg = { channel, threadKey: String(a.threadKey), text: formatForChannel(channel, String(a.text)) };
         this.outbox.push(msg);
         this.opts.onOutbound?.(msg);
@@ -143,6 +175,13 @@ export class SuperAgent {
         return this.finishWorker(String(a.workerId), "failed", "cancelled by router");
       case "recall":
         return this.render(String(a.id), Number(a.offset ?? 0));
+      case "remember":
+      case "memory_search":
+        return this.memoryTool(name, a, this.identity?.webId);
+      case "list_agents":
+        return JSON.stringify(this.opts.bus?.directory().filter((d) => d.id !== this.identity?.id) ?? []);
+      case "message_agent":
+        return this.sendAgentMessage(String(a.to), String(a.threadKey ?? "a2a"), String(a.text));
       case "add_policy":
         this.state.policies.push(String(a.policy));
         return "Policy added";
@@ -157,6 +196,11 @@ export class SuperAgent {
     this.state.workers[rec.id] = rec;
     th.subscriberIds.push(rec.id);
     const s = this.spawnSession(rec);
+    if (this.opts.identity) {
+      const p = this.opts.identity.issue(`worker-${rec.id}`).then((i) => { rec.identity = i; }).catch(() => undefined);
+      this.pendingIdentities.add(p);
+      void p.finally(() => this.pendingIdentities.delete(p));
+    }
     s.inbox.push(`Your task${speculative ? " (SPECULATIVE)" : ""}: ${task}\nContext:\n${this.render(th.id)}`);
     return rec;
   }
@@ -178,11 +222,19 @@ export class SuperAgent {
       case "start": {
         const env = this.opts.environments.find((e) => e.id === a.environment) ?? this.opts.environments.find((e) => e.online());
         if (!env || !env.online()) return "No online environment; retry later";
+        let command = String(a.command);
+        if (this.opts.credentials) {
+          try {
+            command = this.opts.credentials.inject(command, rec.identity?.id ?? wid);
+          } catch (e) {
+            return (e as Error).message;
+          }
+        }
         const jobId = newId("job");
         this.jobs.set(jobId, { workerId: wid, env });
-        env.start(jobId, String(a.command), (r: ExecResult) => {
+        env.start(jobId, command, (r: ExecResult) => {
           this.jobs.delete(jobId);
-          this.workers.get(wid)?.inbox.push(`Job ${jobId} finished (exit ${r.code}).\nstdout: ${r.stdout.slice(-2000)}\nstderr: ${r.stderr.slice(-1000)}`);
+          this.workers.get(wid)?.inbox.push(this.redact(`Job ${jobId} finished (exit ${r.code}).\nstdout: ${r.stdout.slice(-2000)}\nstderr: ${r.stderr.slice(-1000)}`));
         });
         return `Started ${jobId}`;
       }
@@ -218,9 +270,40 @@ export class SuperAgent {
         return "Handed back";
       case "recall":
         return this.render(String(a.id), Number(a.offset ?? 0));
+      case "remember":
+      case "memory_search":
+        return this.memoryTool(name, a, rec.identity?.webId ?? wid);
+      case "list_secrets":
+        return JSON.stringify(this.opts.credentials?.names() ?? []);
       default:
         return `Unknown tool ${name}`;
     }
+  }
+
+  private memoryTool(name: string, a: Record<string, unknown>, author?: string): string {
+    if (name === "remember") {
+      const tags = Array.isArray(a.tags) ? a.tags.map(String) : [];
+      return `Remembered ${this.memory.remember(this.redact(String(a.text)), tags, author).id}`;
+    }
+    const hits = this.memory.recall(String(a.query));
+    return hits.length ? hits.map((f) => `[${f.id}] ${f.text}`).join("\n") : "No memories";
+  }
+
+  redact(text: string): string {
+    return this.opts.credentials ? this.opts.credentials.redact(text) : text;
+  }
+
+  // ---------- Agent-to-agent ----------
+  async sendAgentMessage(to: string, threadKey: string, text: string): Promise<string> {
+    const bus = this.opts.bus;
+    if (!bus || !this.identity) return "No agent bus configured";
+    const e: AgentEnvelope = { from: this.identity.id, to, threadKey, text: this.redact(text), sentAt: Date.now() };
+    if (this.opts.identity) e.signature = this.opts.identity.sign(this.identity.id, envelopePayload(e));
+    return bus.send(e);
+  }
+
+  private receiveAgentMessage(e: AgentEnvelope) {
+    return this.ingest({ channel: "agent", source: e.from, threadKey: e.threadKey, author: e.from, text: e.text, mentionsAgent: true });
   }
 
   private finishWorker(wid: string, status: "done" | "failed", summary: string, silent = false): string {
@@ -238,6 +321,7 @@ export class SuperAgent {
   // ---------- Scheduling ----------
   /** Run all sessions concurrently until nothing is queued and no jobs are running. */
   async runUntilIdle(maxRounds = 200): Promise<void> {
+    if (this.pendingIdentities.size) await Promise.all(this.pendingIdentities);
     for (let i = 0; i < maxRounds; i++) {
       const pending = [this.router, ...this.workers.values()].filter((s) => s.inbox.size > 0);
       if (pending.length === 0) {

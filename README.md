@@ -37,6 +37,7 @@ Full write-up: [docs/SOURCE_SUMMARY.md](docs/SOURCE_SUMMARY.md).
 npm install
 npm run build
 npm test
+npm run demo           # scripted end-to-end demo, no API key needed
 cp .env.example .env   # any OpenAI-compatible endpoint: OpenAI, DeepSeek, OpenRouter, vLLM, Ollama…
 set -a; . ./.env; set +a
 npm start              # full-duplex terminal channel; "#pr-42 add tests" targets a thread
@@ -47,6 +48,8 @@ npm start              # full-duplex terminal channel; "#pr-42 add tests" target
 | `LLM_BASE_URL` | OpenAI-compatible base URL (default `https://api.openai.com/v1`) |
 | `LLM_API_KEY` | API key |
 | `ROUTER_MODEL` / `WORKER_MODEL` / `WATCHDOG_MODEL` | Lighter model for the Router, strongest for Workers (falls back to `LLM_MODEL`) |
+| `SECRET_*` | Loaded by `CredentialBroker.fromEnv()`; `SECRET_GH_TOKEN` is usable as `{{secret:GH_TOKEN}}` |
+| `OPENID_BASE_URL` | OpenID Solid server for identities + pod-backed state (also enables the live integration test) |
 | `STATE_DIR` | Where `FileStore` persists state (default `.superagent-state`) |
 
 ## Library usage
@@ -91,12 +94,45 @@ src/
   environments.ts  execution environment interface (local + fake)
   store.ts         persistent state (memory / file)
   watchdog.ts      external control loop
+  memory.ts        long-term memory: durable facts, keyword recall, stored in the state snapshot
+  credentials.ts   credential broker: {{secret:NAME}} injected at exec time, redacted from outputs
+  identity.ts      Ed25519 identities, did:key, signing (LocalIdentityProvider)
+  openid.ts        OpenID Solid server client, OpenIDIdentityProvider, OpenIDPodStore
+  a2a.ts           signed agent-to-agent bus between Super-agent instances
+  sharding.ts      ShardedRouter: partition triggers across Router shards by thread or channel
   cli.ts           example CLI
-test/              vitest suite
+examples/          demo.ts (scripted, `npm run demo`), openid.ts (`npm run example:openid`)
+test/              vitest suite (unit + key-gated integration tests)
 ```
 
-## Not yet implemented (open problems in the post)
-Router sharding, long-term memory, A2A between instances, and credential isolation / prompt-injection defences. Treat any event source as untrusted input.
+## Identity and state with OpenID
+[Hewlbern/openID](https://github.com/Hewlbern/openID) is a Go Solid server that gives each AI agent a WebID, an Ed25519 key, a pod and an audited (IPFS + OpenTimestamps) write log. superOpenAgent talks to it over HTTP, so no Go code or extra npm dependency is needed and a fresh clone builds on its own:
+
+```ts
+const provider = new OpenIDIdentityProvider(new OpenIDClient("http://localhost:3000"));
+const agent = await new SuperAgent({
+  routerLLM, workerLLM, environments,
+  identity: provider,                                // Router + every Worker get POST /agents → WebID + pod + key
+  storeFor: (id) => new OpenIDPodStore(provider, id), // state snapshot (sessions, threads, memory) → {pod}/superagent/state.json
+  credentials: CredentialBroker.fromEnv(),           // secrets stay in process memory, never in the pod
+}).init();
+```
+
+- **Identity:** `IdentityProvider` issues an identity to the Router at `init()` and to each Worker at `dispatch()`. Worker identities sign agent-to-agent messages, scope credential grants (`register(name, value, [identityId])`) and are recorded as the author of memory facts. `LocalIdentityProvider` does the same offline.
+- **State:** `OpenIDPodStore` implements `StateStore`. It uses the pod's Bearer token, or signed requests (`X-Agent-*`, Ed25519 over `METHOD|PATH|TS|WEBID`) with `provider.auth(id, method, path, true)`.
+- **Run it:** `cd openID && go run ./cmd/server -port 3000`, then `OPENID_BASE_URL=http://localhost:3000 npm run example:openid` or `npm run test:integration`. CI does this as well.
+- **Caution:** with the default ACLs, pod resources on a local OpenID server could be read without auth. Don't put sensitive data in state; secrets are never written there.
+
+## Roadmap
+Done (v0.2): the post's open problems as working modules: long-term memory, the credential broker, agent-to-agent messaging, Router sharding, plus OpenID identity/state, CI and examples.
+
+Next:
+- [ ] Run the real-model smoke test (`LLM_API_KEY=… npm run test:integration`) in CI with a repo secret
+- [ ] Semantic (embedding) memory recall and memory decay/consolidation
+- [ ] Network A2A transport (OpenID pod inboxes + Solid notifications) instead of the in-process bus
+- [ ] Shard rebalancing and cross-shard worker hand-off
+- [ ] Write private WAC ACLs on the agent pod; prompt-injection defences for untrusted event sources
+- [ ] Real channel adapters (Slack, GitHub webhooks, email)
 
 ## License
 [MIT](LICENSE) © 2026 Mike Holborn

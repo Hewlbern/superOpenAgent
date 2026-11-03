@@ -11,6 +11,7 @@ export const channelNorms: Record<ChannelKind, string> = {
   doc: "Docs: structured summaries with headings.",
   calendar: "Calendar: one-line notes.",
   ci: "CI: do not reply; act on results.",
+  agent: "Agent-to-agent: precise, machine-readable, include IDs.",
 };
 
 export function formatForChannel(channel: ChannelKind, text: string): string {

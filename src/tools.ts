@@ -14,6 +14,10 @@ export const routerTools: ToolSpec[] = [
   { name: "forward", description: "Forward information to an existing worker (cross-task coordination).", parameters: obj({ workerId: str("worker"), text: str("message") }, ["workerId", "text"]) },
   { name: "cancel", description: "Cancel a worker.", parameters: obj({ workerId: str("worker") }, ["workerId"]) },
   { name: "recall", description: "Recall any object (trigger/thread/worker) by ID; follows Chain of Recall.", parameters: obj({ id: str("object id"), offset: { type: "number" } }, ["id"]) },
+  { name: "remember", description: "Store a durable fact in long-term memory.", parameters: obj({ text: str("fact"), tags: { type: "array", items: { type: "string" } } }, ["text"]) },
+  { name: "memory_search", description: "Recall long-term memory facts by keyword.", parameters: obj({ query: str("keywords") }, ["query"]) },
+  { name: "message_agent", description: "Send a message to another Super-agent instance (see list_agents).", parameters: obj({ to: str("agent id or name"), threadKey: str("thread"), text: str("message") }, ["to", "text"]) },
+  { name: "list_agents", description: "List peer Super-agents reachable on the agent bus.", parameters: obj({}) },
   { name: "add_policy", description: "Add a natural-language semantic filtering policy.", parameters: obj({ policy: str("policy text") }, ["policy"]) },
 ];
 
@@ -27,6 +31,9 @@ export const workerTools: ToolSpec[] = [
   { name: "subscribe", description: "Subscribe to another thread.", parameters: obj({ threadKey: str("thread") }, ["threadKey"]) },
   { name: "unsubscribe", description: "Unsubscribe from a thread.", parameters: obj({ threadKey: str("thread") }, ["threadKey"]) },
   { name: "handback", description: "Hand an out-of-scope trigger back to the Router for re-dispatch.", parameters: obj({ triggerId: str("trigger id") }, ["triggerId"]) },
+  { name: "remember", description: "Store a durable fact in long-term memory.", parameters: obj({ text: str("fact"), tags: { type: "array", items: { type: "string" } } }, ["text"]) },
+  { name: "memory_search", description: "Recall long-term memory facts by keyword.", parameters: obj({ query: str("keywords") }, ["query"]) },
+  { name: "list_secrets", description: "List secret NAMES available. Use {{secret:NAME}} inside start commands; the value is injected at execution time and never shown to you.", parameters: obj({}) },
   { name: "recall", description: "Recall any object by ID.", parameters: obj({ id: str("object id"), offset: { type: "number" } }, ["id"]) },
 ];
 
